@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KT-NHN Multi-Cloud Traffic Simulator</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --panel-bg: #1e293b;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --accent-kt: #06b6d4;
+            --accent-nhn: #ec4899;
+            --accent-gslb: #a855f7;
+            --accent-common: #10b981;
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        h1 {
+            margin: 10px 0 5px 0;
+            font-size: 1.8rem;
+            color: var(--text-primary);
+            text-align: center;
+        }
+
+        p.desc {
+            color: var(--text-secondary);
+            margin-bottom: 20px;
+            font-size: 0.95rem;
+            text-align: center;
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+            max-width: 900px;
+            background-color: var(--panel-bg);
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            border: 1px solid #334155;
+        }
+
+        .controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #334155;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .btn {
+            background-color: #3b82f6;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+
+        .btn:hover {
+            background-color: #2563eb;
+        }
+
+        .btn-stop {
+            background-color: #ef4444;
+        }
+
+        .btn-stop:hover {
+            background-color: #dc2626;
+        }
+
+        .slider-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        .canvas-container {
+            position: relative;
+            width: 100%;
+            background-color: #0b0f19;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #1e293b;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        .legend {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-top: 15px;
+            font-size: 0.85rem;
+            flex-wrap: wrap;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>KT-NHN 멀티 클라우드 트래픽 아키텍처 시뮬레이터</h1>
+    <p class="desc">각 레이어의 분산 구조와 공통 보안 장비/NKS 풀 통과 시의 흐름을 직접 제어하고 시각화합니다.</p>
+
+    <div class="container">
+        <div class="controls">
+            <div>
+                <button class="btn" id="startBtn">트래픽 전송</button>
+                <button class="btn btn-stop" id="clearBtn">초기화</button>
+            </div>
+            <div class="slider-group">
+                <label for="speed">트래픽 속도:</label>
+                <input type="range" id="speed" min="1" max="5" value="3">
+                <span id="speedVal">보통</span>
+            </div>
+            <div class="slider-group">
+                <label for="ratio">NHN 가중치 (vs KT 1):</label>
+                <input type="range" id="ratio" min="1" max="5" value="3">
+                <span id="ratioVal">3배</span>
+            </div>
+        </div>
+
+        <div class="canvas-container">
+            <canvas id="simCanvas" width="860" height="720"></canvas>
+        </div>
+
+        <div class="legend">
+            <div class="legend-item"><span class="dot" style="background: var(--accent-gslb);"></span> GSLB</div>
+            <div class="legend-item"><span class="dot" style="background: var(--accent-kt);"></span> KT Cloud (25%)</div>
+            <div class="legend-item"><span class="dot" style="background: var(--accent-nhn);"></span> NHN Cloud (75%)</div>
+            <div class="legend-item"><span class="dot" style="background: var(--accent-common);"></span> 공통 자원 통과</div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // 상태 관리
+        let isSending = true;
+        let speedMultiplier = 1.5;
+        let nhnWeight = 3; // KT : NHN = 1 : 3 비율
+        let particles = [];
+        let animationFrameId;
+
+        // 노드 정의 (X, Y 좌표 배치)
+        const nodes = {
+            internet: { x: 430, y: 40, label: "Internet / Gateway", color: "#64748b" },
+            gslb: { x: 430, y: 100, label: "Main GSLB", color: "#a855f7" },
+            
+            // KT 영역
+            ktLB: { x: 120, y: 200, label: "KT LB-01", color: "#06b6d4" },
+            ktEnd: { x: 120, y: 400, label: "KT 인프라 완료", color: "#0891b2" },
+
+            // NHN 영역
+            nhnLBs: [
+                { x: 380, y: 200, label: "IPS LB-01", color: "#ec4899" },
+                { x: 530, y: 200, label: "IPS LB-02", color: "#ec4899" },
+                { x: 680, y: 200, label: "IPS LB-03", color: "#ec4899" }
+            ],
+            ipsCommon: { x: 530, y: 280, label: "IPS-01 / IPS-02 (공통 보안 풀)", color: "#10b981" },
+            wafLBs: [
+                { x: 380, y: 350, label: "WAF LB-01", color: "#3b82f6" },
+                { x: 530, y: 350, label: "WAF LB-02", color: "#3b82f6" },
+                { x: 680, y: 350, label: "WAF LB-03", color: "#3b82f6" }
+            ],
+            wafCommon: { x: 530, y: 430, label: "WAF-01 / WAF-02 (공통 웹방화벽 풀)", color: "#10b981" },
+            frontLBs: [
+                { x: 380, y: 500, label: "Front LB-01 (3G)", color: "#f59e0b" },
+                { x: 530, y: 500, label: "Front LB-02 (3G)", color: "#f59e0b" },
+                { x: 680, y: 500, label: "Front LB-03 (3G)", color: "#f59e0b" }
+            ],
+            frontNKS: { x: 530, y: 580, label: "Front NKS (공통 쿠버네티스 웹 풀)", color: "#10b981" },
+            backLBs: [
+                { x: 380, y: 640, label: "Back LB-01 (3G)", color: "#84cc16" },
+                { x: 530, y: 640, label: "Back LB-02 (3G)", color: "#84cc16" },
+                { x: 680, y: 640, label: "Back LB-03 (3G)", color: "#84cc16" }
+            ],
+            backNKS: { x: 530, y: 690, label: "Backend NKS (공통 백엔드 API)", color: "#10b981" }
+        };
+
+        // UI 이벤트 핸들러
+        document.getElementById('startBtn').addEventListener('click', () => {
+            isSending = !isSending;
+            document.getElementById('startBtn').textContent = isSending ? "일시정지" : "트래픽 전송";
+            document.getElementById('startBtn').style.backgroundColor = isSending ? "#3b82f6" : "#10b981";
+        });
+
+        document.getElementById('clearBtn').addEventListener('click', () => {
+            particles = [];
+        });
+
+        const speedSlider = document.getElementById('speed');
+        const speedVal = document.getElementById('speedVal');
+        speedSlider.addEventListener('input', (e) => {
+            const val = parseInt(e.target.value);
+            const speedMap = ["느림", "약간 느림", "보통", "빠름", "매우 빠름"];
+            speedVal.textContent = speedMap[val - 1];
+            speedMultiplier = val * 0.5;
+        });
+
+        const ratioSlider = document.getElementById('ratio');
+        const ratioVal = document.getElementById('ratioVal');
+        ratioSlider.addEventListener('input', (e) => {
+            nhnWeight = parseInt(e.target.value);
+            ratioVal.textContent = `${nhnWeight}배`;
+        });
+
+        // 패킷 입자 생성기
+        class Particle {
+            constructor(path, color) {
+                this.path = path; // 이동해야 할 노드 배열
+                this.color = color;
+                this.currentSegment = 0;
+                this.x = path[0].x;
+                this.y = path[0].y;
+                this.progress = 0;
+                this.speed = (0.01 + Math.random() * 0.005) * speedMultiplier;
+            }
+
+            update() {
+                this.speed = (0.01 + Math.random() * 0.005) * speedMultiplier;
+                this.progress += this.speed;
+                if (this.progress >= 1) {
+                    this.progress = 0;
+                    this.currentSegment++;
+                }
+
+                if (this.currentSegment < this.path.length - 1) {
+                    const start = this.path[this.currentSegment];
+                    const end = this.path[this.currentSegment + 1];
+                    this.x = start.x + (end.x - start.x) * this.progress;
+                    this.y = start.y + (end.y - start.y) * this.progress;
+                    return true;
+                }
+                return false; // 경로 끝남
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, 4, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.shadowBlur = 8;
+                ctx.shadowColor = this.color;
+                ctx.fill();
+                ctx.shadowBlur = 0; // 그림자 초기화
+            }
+        }
+
+        // 경로 계산 헬퍼 함수
+        function createPath() {
+            const path = [nodes.internet, nodes.gslb];
+            
+            // GSLB에서 가중치 기반으로 KT / NHN 분배 결정
+            const rand = Math.random() * (1 + nhnWeight);
+            if (rand < 1) {
+                // KT 경로 선택
+                path.push(nodes.ktLB);
+                path.push(nodes.ktEnd);
+                return { path, color: "#06b6d4" };
+            } else {
+                // NHN 경로 선택 (3대의 IPS LB 중 랜덤 1대 선택)
+                const targetIpsLb = nodes.nhnLBs[Math.floor(Math.random() * 3)];
+                path.push(targetIpsLb);
+                
+                // 공통 IPS 풀 통과
+                path.push(nodes.ipsCommon);
+                
+                // 다시 3대의 WAF LB 중 랜덤 1대 선택
+                const targetWafLb = nodes.wafLBs[Math.floor(Math.random() * 3)];
+                path.push(targetWafLb);
+                
+                // 공통 WAF 풀 통과
+                path.push(nodes.wafCommon);
+                
+                // 다시 3대의 Front LB 중 랜덤 1대 선택
+                const targetFrontLb = nodes.frontLBs[Math.floor(Math.random() * 3)];
+                path.push(targetFrontLb);
+                
+                // 공통 Front NKS 풀 통과
+                path.push(nodes.frontNKS);
+                
+                // 3대의 Back LB 중 랜덤 1대 선택
+                const targetBackLb = nodes.backLBs[Math.floor(Math.random() * 3)];
+                path.push(targetBackLb);
+                
+                // 최종 Backend NKS 수렴
+                path.push(nodes.backNKS);
+                
+                return { path, color: "#ec4899" };
+            }
+        }
+
+        // 라인 그리기 함수
+        function drawConnection(p1, p2, color = "#1e293b") {
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+        }
+
+        // 노드 그리기 함수
+        function drawNode(node, isCommon = false) {
+            ctx.beginPath();
+            if (isCommon) {
+                // 공통 풀은 눈에 띄게 큰 둥근 사각형 혹은 원형으로 그림
+                ctx.rect(node.x - 120, node.y - 18, 240, 36);
+                ctx.fillStyle = "#064e3b";
+                ctx.strokeStyle = "#10b981";
+                ctx.lineWidth = 2;
+                ctx.fill();
+                ctx.stroke();
+            } else {
+                // 일반 로드밸런서 노드
+                ctx.arc(node.x, node.y, 14, 0, Math.PI * 2);
+                ctx.fillStyle = "#1e293b";
+                ctx.strokeStyle = node.color;
+                ctx.lineWidth = 2;
+                ctx.fill();
+                ctx.stroke();
+            }
+
+            // 라벨링
+            ctx.fillStyle = "#f8fafc";
+            ctx.font = isCommon ? "bold 11px sans-serif" : "11px sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(node.label, node.x, node.y);
+        }
+
+        // 메인 애니메이션 루프
+        function animate() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 1. 모든 인프라 백그라운드 연결선 그리기
+            drawConnection(nodes.internet, nodes.gslb);
+            drawConnection(nodes.gslb, nodes.ktLB, "#334155");
+            drawConnection(nodes.ktLB, nodes.ktEnd, "#334155");
+
+            nodes.nhnLBs.forEach(lb => {
+                drawConnection(nodes.gslb, lb, "#334155");
+                drawConnection(lb, nodes.ipsCommon, "#334155");
+            });
+
+            nodes.wafLBs.forEach(lb => {
+                drawConnection(nodes.ipsCommon, lb, "#334155");
+                drawConnection(lb, nodes.wafCommon, "#334155");
+            });
+
+            nodes.frontLBs.forEach(lb => {
+                drawConnection(nodes.wafCommon, lb, "#334155");
+                drawConnection(lb, nodes.frontNKS, "#334155");
+            });
+
+            nodes.backLBs.forEach(lb => {
+                drawConnection(nodes.frontNKS, lb, "#334155");
+                drawConnection(lb, nodes.backNKS, "#334155");
+            });
+
+            // 2. 새로운 패킷 실시간 생성
+            if (isSending && Math.random() < 0.15 * speedMultiplier) {
+                const { path, color } = createPath();
+                particles.push(new Particle(path, color));
+            }
+
+            // 3. 패킷 업데이트 및 그리기
+            particles = particles.filter(p => {
+                const active = p.update();
+                if (active) p.draw();
+                return active;
+            });
+
+            // 4. 노드 UI 렌더링 (가장 위에 덧그림)
+            drawNode(nodes.internet);
+            drawNode(nodes.gslb);
+            drawNode(nodes.ktLB);
+            drawNode(nodes.ktEnd);
+
+            nodes.nhnLBs.forEach(lb => drawNode(lb));
+            drawNode(nodes.ipsCommon, true);
+
+            nodes.wafLBs.forEach(lb => drawNode(lb));
+            drawNode(nodes.wafCommon, true);
+
+            nodes.frontLBs.forEach(lb => drawNode(lb));
+            drawNode(nodes.frontNKS, true);
+
+            nodes.backLBs.forEach(lb => drawNode(lb));
+            drawNode(nodes.backNKS, true);
+
+            animationFrameId = requestAnimationFrame(animate);
+        }
+
+        // 시뮬레이터 실행
+        animate();
+    </script>
+</body>
+</html>
